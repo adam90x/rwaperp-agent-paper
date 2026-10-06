@@ -52,7 +52,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1
   <div class="card"><div class="k">Closed trades</div><div id="closed" class="v">—</div></div>
   <div class="card"><div class="k">Profit factor</div><div id="pf" class="v">—</div></div>
   <div class="card"><div class="k">Peak equity</div><div id="peak" class="v">$—</div></div>
-  <div class="card"><div class="k">Markets scanned</div><div id="scans" class="v">—</div></div>
+  <div class="card"><div class="k">Markets in last scan</div><div id="scans" class="v">—</div></div>
 
   <div class="card span2"><div class="section"><h2>📈 Equity curve</h2><span class="tiny">last dashboard observations</span></div><div id="chart" class="chart"></div></div>
   <div class="card span2"><div class="section"><h2>🎯 Performance</h2><span class="tiny">wins vs losses</span></div><div id="perfchart" class="chart"></div></div>
@@ -106,7 +106,7 @@ async function refresh(){
   $('pnl').textContent=(pnl>=0?'+':'')+money(pnl); $('pnl').className='v '+(pnl>=0?'green':'red');
   $('open').textContent=(d.open_positions||0)+' / 4'; $('winrate').textContent=Number(d.win_rate_pct||0).toFixed(1)+'%';
   $('closed').textContent=d.closed_trades??0; $('pf').textContent=d.profit_factor==null?'—':Number(d.profit_factor).toFixed(2);
-  $('peak').textContent=money(d.peak_equity); $('scans').textContent=d.markets_scanned??d.markets_count??0;
+  $('peak').textContent=money(d.peak_equity); $('scans').textContent=d.markets_count??0;
   const eq=Number(d.equity||0); equityHistory.push(eq); if(equityHistory.length>80)equityHistory.shift();
   $('chart').innerHTML=lineChart(equityHistory);
   $('perfchart').innerHTML=perfChart(Number(d.wins||0),Number(d.losses||0));
@@ -126,90 +126,3 @@ def start_agent_once():
             return
         _started = True
         threading.Thread(target=main, name="paper-agent", daemon=True).start()
-
-@app.get("/")
-def root():
-    start_agent_once()
-    return Response(DASHBOARD_HTML, mimetype="text/html")
-
-@app.get("/health")
-def health():
-    start_agent_once()
-    return jsonify({"ok": True, "service": "rwaperp-agent-final-paper", "live_order_execution": False}), 200
-
-@app.get("/status")
-def status():
-    start_agent_once()
-    p = BASE / "paper_live_report.json"
-    data = {}
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-
-    state_path = BASE / "paper_state.json"
-    if state_path.exists():
-        try:
-            st = json.loads(state_path.read_text(encoding="utf-8"))
-            starting = float(st.get("starting_equity") or 500.0)
-            equity = float(st.get("equity") or data.get("equity") or starting)
-            peak = float(st.get("peak_equity") or 0.0)
-            if peak <= 0:
-                peak = max(starting, equity)
-
-            data["equity"] = equity
-            data["starting_equity"] = starting
-            data["peak_equity"] = peak
-            data["cash"] = float(st.get("cash") or data.get("cash") or starting)
-            data["realized_pnl"] = float(st.get("realized_pnl") or 0.0)
-            data["unrealized_pnl"] = float(st.get("unrealized_pnl") or 0.0)
-            data["positions"] = st.get("positions", {})
-            data["open_positions"] = len(data["positions"])
-            data["halt_reason"] = st.get("halt_reason")
-            data["wins"] = int(st.get("wins") or 0)
-            data["losses"] = int(st.get("losses") or 0)
-            closed = data["wins"] + data["losses"]
-            data["closed_trades"] = closed
-            data["win_rate_pct"] = data["wins"] / closed * 100 if closed else 0.0
-            gp = float(st.get("gross_profit") or 0.0)
-            gl = float(st.get("gross_loss") or 0.0)
-            data["profit_factor"] = gp / gl if gl > 0 else None
-        except Exception:
-            pass
-
-    data.setdefault("equity", 500.0)
-    data.setdefault("starting_equity", 500.0)
-    data.setdefault("peak_equity", max(500.0, float(data.get("equity") or 500.0)))
-    data.setdefault("positions", {})
-    data.setdefault("open_positions", len(data["positions"]))
-    data.setdefault("wins", 0)
-    data.setdefault("losses", 0)
-    data.setdefault("closed_trades", int(data["wins"]) + int(data["losses"]))
-    data.setdefault("win_rate_pct", 0.0)
-    data.setdefault("scan_count", 0)
-    data.setdefault("markets_count", 0)
-    data["markets_scanned"] = data.get("markets_count", 0)
-    data["live_order_execution"] = False
-    return jsonify(data), 200
-
-@app.get("/history")
-def history():
-    start_agent_once()
-    p = BASE / "paper_events.jsonl"
-    out = []
-    if p.exists():
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines()[-300:]:
-                try:
-                    e = json.loads(line)
-                    if e.get("event") in ("PAPER_EXIT", "PAPER_ENTRY", "PAPER_PARTIAL"):
-                        out.append(e)
-                except Exception:
-                    continue
-        except Exception:
-            pass
-    out = out[-100:][::-1]
-    return jsonify(out), 200
-
-start_agent_once()

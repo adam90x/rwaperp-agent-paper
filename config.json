@@ -56,7 +56,7 @@
     "reserve_pct": 0.0
   },
   "telegram": {
-    "enabled": false,
+    "enabled": true,
     "send_heartbeat": true,
     "heartbeat_minutes": 15
   }

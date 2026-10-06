@@ -126,3 +126,70 @@ def start_agent_once():
         if _started:
             return
         _started = True
+        threading.Thread(target=run_agent_script, name="paper-agent", daemon=True).start()
+
+@app.get("/")
+def root():
+    start_agent_once()
+    return Response(DASHBOARD_HTML, mimetype="text/html")
+
+@app.get("/health")
+def health():
+    start_agent_once()
+    return jsonify({"ok": True, "service": "rwaperp-agent-paper", "live_order_execution": False}), 200
+
+@app.get("/status")
+def status():
+    start_agent_once()
+    data = {}
+    try:
+        p = BASE / "paper_live_report.json"
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    try:
+        p = BASE / "paper_state.json"
+        if p.exists():
+            st = json.loads(p.read_text(encoding="utf-8"))
+            data["positions"] = st.get("positions", {})
+            data["halt_reason"] = st.get("halt_reason")
+            data["starting_equity"] = st.get("starting_equity", 500.0)
+            data["equity"] = float(st.get("equity", data.get("equity", 500.0)))
+            data["peak_equity"] = float(st.get("peak_equity") or data.get("peak_equity") or data["equity"])
+            data["realized_pnl"] = float(st.get("realized_pnl") or 0.0)
+            data["unrealized_pnl"] = float(st.get("unrealized_pnl") or 0.0)
+            data["wins"] = int(st.get("wins") or 0)
+            data["losses"] = int(st.get("losses") or 0)
+            closed = data["wins"] + data["losses"]
+            data["closed_trades"] = closed
+            data["win_rate_pct"] = (data["wins"] / closed * 100) if closed else 0.0
+    except Exception:
+        pass
+    data.setdefault("equity", 500.0)
+    data.setdefault("starting_equity", 500.0)
+    data.setdefault("positions", {})
+    data.setdefault("open_positions", len(data["positions"]))
+    data.setdefault("markets_count", data.get("markets_scanned", 0))
+    data["live_order_execution"] = False
+    return jsonify(data), 200
+
+@app.get("/history")
+def history():
+    start_agent_once()
+    out = []
+    p = BASE / "paper_events.jsonl"
+    if p.exists():
+        try:
+            for line in p.read_text(encoding="utf-8").splitlines()[-400:]:
+                try:
+                    e = json.loads(line)
+                    if e.get("event") in ("PAPER_EXIT","PAPER_ENTRY","PAPER_PARTIAL"):
+                        out.append(e)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return jsonify(out[-100:][::-1]), 200
+
+start_agent_once()

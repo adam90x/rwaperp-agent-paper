@@ -1,0 +1,63 @@
+{
+  "starting_equity": 500.0,
+  "poll_seconds": 20,
+  "heartbeat_minutes": 15,
+  "symbols": [],
+  "risk": {
+    "max_open_positions": 4,
+    "max_position_pct": 7.0,
+    "max_total_position_pct": 28.0,
+    "max_same_direction_positions": 3,
+    "max_correlated_pair": 0.8,
+    "risk_per_trade_pct": 0.75,
+    "min_leverage": 1.0,
+    "max_leverage": 5.0,
+    "default_leverage": 2.0,
+    "min_liquidation_buffer_multiple": 4.0,
+    "max_daily_loss_pct": 2.5,
+    "max_equity_drawdown_pct": 6.0,
+    "max_consecutive_losses": 3,
+    "loss_cooldown_min": 30,
+    "max_holding_minutes": 60,
+    "min_stop_pct": 0.75,
+    "max_stop_pct": 1.5,
+    "reward_r_multiple": 2.5,
+    "partial_take_r": 1.0,
+    "partial_take_fraction": 0.3,
+    "trail_start_r": 1.5,
+    "trail_distance_r": 1.0,
+    "trail_lock_r": 0.5
+  },
+  "filters": {
+    "min_24h_volume": 10000.0,
+    "max_spread_bps": 25.0,
+    "min_depth_notional": 2000.0,
+    "min_score": 78.0,
+    "min_score_slot_2": 82.0,
+    "min_score_slot_3": 85.0,
+    "min_score_slot_4": 88.0,
+    "min_momentum_5_pct": 0.15,
+    "min_volume_acceleration": 1.2,
+    "min_trade_imbalance": 0.12,
+    "min_book_imbalance": 0.08,
+    "max_mark_index_deviation_pct": 0.5,
+    "max_volatility_pct": 3.0,
+    "min_atr_pct": 0.05,
+    "max_shock_atr_multiple": 2.8,
+    "max_adverse_funding_rate_pct": 0.08,
+    "funding_penalty_start_pct": 0.03,
+    "fee_buffer_pct_round_trip": 0.2,
+    "min_expected_edge_pct": 0.3,
+    "min_relative_strength_pct": 0.1,
+    "min_confirmations": 4
+  },
+  "capital": {
+    "compound_profits": true,
+    "reserve_pct": 0.0
+  },
+  "telegram": {
+    "enabled": false,
+    "send_heartbeat": true,
+    "heartbeat_minutes": 15
+  }
+}

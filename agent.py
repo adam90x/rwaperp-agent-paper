@@ -1190,7 +1190,7 @@ def main():
                 f"halt={state['halt_reason'] or '-'}"
             )
 
-            time.sleep(CFG["poll_seconds"])
+          time.sleep(2)
 
         except KeyboardInterrupt:
             save_state(state)

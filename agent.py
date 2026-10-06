@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from statistics import median
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -952,7 +953,8 @@ def write_report(state, scan_count):
         "max_position_pct": CFG["risk"]["max_position_pct"],
         "max_total_exposure_pct": CFG["risk"]["max_total_position_pct"],
         "live_order_execution": False,
-        "scan_count": scan_count
+        "scan_count": scan_count,
+        "markets_count": len(state.get("_last_markets_count", []))
     }
     REPORT_FILE.write_text(
         json.dumps(report, indent=2, default=str),
@@ -1011,13 +1013,35 @@ def main():
             markets = []
             market_map = {}
 
-            for symbol in symbols:
+            # Fetch market details concurrently. The old sequential loop waited
+            # for one API request at a time, which made ~135 markets appear
+            # painfully slow. A bounded pool keeps the load controlled while
+            # allowing several public requests in flight at once.
+            def fetch_market(symbol):
                 try:
+                    data = market_detail(symbol)
                     m = build_features(
                         symbol,
-                        market_detail(symbol),
+                        data,
                         funding.get(symbol, {})
                     )
+                    return symbol, m, None
+                except Exception as exc:
+                    return symbol, None, str(exc)
+
+            max_workers = min(12, max(4, len(symbols)))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(fetch_market, symbol) for symbol in symbols]
+                for future in as_completed(futures):
+                    symbol, m, error = future.result()
+                    if error:
+                        log_event({
+                            "timestamp": iso(utcnow()),
+                            "event": "SCAN_ERROR",
+                            "symbol": symbol,
+                            "error": error
+                        })
+                        continue
                     if min(m["mark"], m["bid"], m["ask"]) <= 0:
                         continue
                     markets.append(m)
@@ -1026,13 +1050,6 @@ def main():
                         "timestamp": iso(utcnow()),
                         "event": "SCAN",
                         "market": m
-                    })
-                except Exception as exc:
-                    log_event({
-                        "timestamp": iso(utcnow()),
-                        "event": "SCAN_ERROR",
-                        "symbol": symbol,
-                        "error": str(exc)
                     })
 
             scan_count += 1
@@ -1111,7 +1128,9 @@ def main():
                     open_position(state, chosen)
 
             mark_equity(state, market_map)
+            state["_last_markets_count"] = markets
             write_report(state, scan_count)
+            state.pop("_last_markets_count", None)
             save_state(state)
 
             last_heartbeat = maybe_heartbeat(
@@ -1141,7 +1160,7 @@ def main():
             })
             save_state(state)
             telegram_send(f"⚠️ AGENT ERROR\n{type(exc).__name__}: {exc}")
-            time.sleep(CFG["poll_seconds"])
+            time.sleep(5)
 
 
 if __name__ == "__main__":

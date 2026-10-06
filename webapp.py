@@ -106,7 +106,7 @@ async function refresh(){
   $('pnl').textContent=(pnl>=0?'+':'')+money(pnl); $('pnl').className='v '+(pnl>=0?'green':'red');
   $('open').textContent=(d.open_positions||0)+' / 4'; $('winrate').textContent=Number(d.win_rate_pct||0).toFixed(1)+'%';
   $('closed').textContent=d.closed_trades??0; $('pf').textContent=d.profit_factor==null?'—':Number(d.profit_factor).toFixed(2);
-  $('peak').textContent=money(d.peak_equity); $('scans').textContent=d.scan_count??0;
+  $('peak').textContent=money(d.peak_equity); $('scans').textContent=d.markets_scanned??d.markets_count??0;
   const eq=Number(d.equity||0); equityHistory.push(eq); if(equityHistory.length>80)equityHistory.shift();
   $('chart').innerHTML=lineChart(equityHistory);
   $('perfchart').innerHTML=perfChart(Number(d.wins||0),Number(d.losses||0));
@@ -141,24 +141,57 @@ def health():
 def status():
     start_agent_once()
     p = BASE / "paper_live_report.json"
+    data = {}
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            state = BASE / "paper_state.json"
-            if state.exists():
-                try:
-                    st = json.loads(state.read_text(encoding="utf-8"))
-                    data["positions"] = st.get("positions", {})
-                    data["halt_reason"] = st.get("halt_reason")
-                    data["starting_equity"] = st.get("starting_equity", 500.0)
-                    data["wins"] = st.get("wins", 0)
-                    data["losses"] = st.get("losses", 0)
-                except Exception:
-                    pass
-            return jsonify(data), 200
+        except Exception:
+            data = {}
+
+    state_path = BASE / "paper_state.json"
+    if state_path.exists():
+        try:
+            st = json.loads(state_path.read_text(encoding="utf-8"))
+            starting = float(st.get("starting_equity") or 500.0)
+            equity = float(st.get("equity") or data.get("equity") or starting)
+            peak = float(st.get("peak_equity") or 0.0)
+            if peak <= 0:
+                peak = max(starting, equity)
+
+            data["equity"] = equity
+            data["starting_equity"] = starting
+            data["peak_equity"] = peak
+            data["cash"] = float(st.get("cash") or data.get("cash") or starting)
+            data["realized_pnl"] = float(st.get("realized_pnl") or 0.0)
+            data["unrealized_pnl"] = float(st.get("unrealized_pnl") or 0.0)
+            data["positions"] = st.get("positions", {})
+            data["open_positions"] = len(data["positions"])
+            data["halt_reason"] = st.get("halt_reason")
+            data["wins"] = int(st.get("wins") or 0)
+            data["losses"] = int(st.get("losses") or 0)
+            closed = data["wins"] + data["losses"]
+            data["closed_trades"] = closed
+            data["win_rate_pct"] = data["wins"] / closed * 100 if closed else 0.0
+            gp = float(st.get("gross_profit") or 0.0)
+            gl = float(st.get("gross_loss") or 0.0)
+            data["profit_factor"] = gp / gl if gl > 0 else None
         except Exception:
             pass
-    return jsonify({"ok": True, "status": "starting", "equity": 500, "starting_equity": 500, "positions": {}, "live_order_execution": False}), 200
+
+    data.setdefault("equity", 500.0)
+    data.setdefault("starting_equity", 500.0)
+    data.setdefault("peak_equity", max(500.0, float(data.get("equity") or 500.0)))
+    data.setdefault("positions", {})
+    data.setdefault("open_positions", len(data["positions"]))
+    data.setdefault("wins", 0)
+    data.setdefault("losses", 0)
+    data.setdefault("closed_trades", int(data["wins"]) + int(data["losses"]))
+    data.setdefault("win_rate_pct", 0.0)
+    data.setdefault("scan_count", 0)
+    data.setdefault("markets_count", 0)
+    data["markets_scanned"] = data.get("markets_count", 0)
+    data["live_order_execution"] = False
+    return jsonify(data), 200
 
 @app.get("/history")
 def history():

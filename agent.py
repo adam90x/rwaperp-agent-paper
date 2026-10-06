@@ -21,6 +21,10 @@ EVENT_FILE = ROOT / "paper_events.jsonl"
 REPORT_FILE = ROOT / "paper_live_report.json"
 
 HTTP = requests.Session()
+MARKET_CACHE = {}
+MARKET_CACHE_TS = {}
+SYMBOL_CURSOR = 0
+LAST_SYMBOL_REFRESH = 0.0
 
 
 def utcnow():
@@ -215,6 +219,34 @@ def discover_symbols():
 
 def market_detail(symbol):
     return post_query({"type": "marketDetail", "symbol": symbol})
+
+
+def refresh_market_batch(symbols, funding):
+    """Refresh a small batch only. Three workers keeps API pressure bounded."""
+    results = {}
+
+    def one(symbol):
+        try:
+            raw = market_detail(symbol)
+            m = build_features(symbol, raw, funding.get(symbol, {}))
+            if min(m["mark"], m["bid"], m["ask"]) <= 0:
+                return symbol, None, "invalid_price"
+            return symbol, m, None
+        except Exception as exc:
+            return symbol, None, f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(one, symbol) for symbol in symbols]
+        for fut in as_completed(futures):
+            symbol, m, err = fut.result()
+            if m is not None:
+                results[symbol] = m
+                MARKET_CACHE[symbol] = m
+                MARKET_CACHE_TS[symbol] = time.time()
+                log_event({"timestamp": iso(utcnow()), "event": "SCAN", "market": m})
+            else:
+                log_event({"timestamp": iso(utcnow()), "event": "SCAN_ERROR", "symbol": symbol, "error": err})
+    return results
 
 
 def ema(values, period):
@@ -931,7 +963,7 @@ def risk_halt(state):
     return False, ""
 
 
-def write_report(state, scan_count):
+def write_report(state, scan_count, markets_count=0):
     closed = state["wins"] + state["losses"]
     win_rate = state["wins"] / closed * 100 if closed else 0.0
     pf = (
@@ -954,7 +986,7 @@ def write_report(state, scan_count):
         "max_total_exposure_pct": CFG["risk"]["max_total_position_pct"],
         "live_order_execution": False,
         "scan_count": scan_count,
-        "markets_count": state.get("_last_markets_count", 0)
+        "markets_count": markets_count
     }
     REPORT_FILE.write_text(
         json.dumps(report, indent=2, default=str),
@@ -981,284 +1013,156 @@ def maybe_heartbeat(state, markets_count, last_heartbeat):
 
 
 def main():
+    global SYMBOL_CURSOR, LAST_SYMBOL_REFRESH
+
     state = load_state()
     scan_count = 0
     last_heartbeat = 0.0
     last_halt_reason = None
-
-    # Rate-limited architecture:
-    # - dashboard/agent cycle every 5 seconds
-    # - only a small rotating batch gets full marketDetail requests per cycle
-    # - open positions are always prioritized
-    # - all discovered markets are refreshed progressively
-    # - with ~135 markets and batch=15, the complete detailed universe
-    #   is refreshed roughly every 45 seconds
-    cycle_seconds = 5.0
-    batch_size = 15
-    max_workers = 3
-    symbols_refresh_seconds = 60.0
-    last_symbols_refresh = 0.0
     symbols = []
-    rotation_index = 0
-    market_cache = {}
-    last_market_count = 0
+    last_symbol_discovery = 0.0
+    cycle_seconds = float(CFG.get("poll_seconds", 5))
+    batch_size = int(CFG.get("batch_size", 15))
+    symbols_refresh_seconds = float(CFG.get("symbols_refresh_seconds", 60))
 
-    print("RWAPerp Agent FINAL — PAPER ONLY")
-    print("LIVE ORDER EXECUTION: DISABLED")
-    print("Max 4 positions | 7% nominal position cap | 28% gross exposure cap")
-    print("Market cycle: 5s | rotating detail batch | API-safe rate limiting")
-    print(f"Starting/current equity: ${state['equity']:.2f}")
+    print("RWAPerp Agent FINAL — PAPER ONLY", flush=True)
+    print("LIVE ORDER EXECUTION: DISABLED", flush=True)
+    print("Max 4 positions | 7% nominal position cap | 28% gross exposure cap", flush=True)
+    print(f"Market cycle target: {cycle_seconds:.1f}s | batch: {batch_size} | workers: 3", flush=True)
+    print(f"Starting/current equity: ${state['equity']:.2f}", flush=True)
 
     telegram_send(
-        f"🤖 RWAPerp Agent FINAL ONLINE\n"
-        f"PAPER ONLY\nEquity: ${state['equity']:.2f}\n"
-        f"Max position: 7% | Max positions: 4\n"
-        f"Market refresh cycle: {cycle_seconds:.0f}s"
+        f"🤖 RWAPerp Agent ONLINE\nPAPER ONLY\n"
+        f"Equity: ${state['equity']:.2f}\n"
+        f"Cycle: {cycle_seconds:.0f}s | batch: {batch_size}"
     )
 
     while True:
-        cycle_started = time.monotonic()
-
+        cycle_started = time.time()
         try:
             halted, reason = risk_halt(state)
             state["halt_reason"] = reason or None
-
             if reason and reason != last_halt_reason:
                 telegram_send(f"🛑 RISK HALT\nReason: {reason}")
                 last_halt_reason = reason
             elif not reason:
                 last_halt_reason = None
 
-            # Discover the universe only once per minute.
-            now_mono = time.monotonic()
-            if not symbols or now_mono - last_symbols_refresh >= symbols_refresh_seconds:
-                try:
-                    discovered = CFG.get("symbols") or discover_symbols()
-                    if discovered:
-                        symbols = sorted(set(discovered))
-                        rotation_index %= len(symbols)
-                        last_symbols_refresh = now_mono
-                        print(f"[UNIVERSE] {len(symbols)} markets discovered")
-                except Exception as exc:
-                    log_event({
-                        "timestamp": iso(utcnow()),
-                        "event": "SYMBOL_DISCOVERY_ERROR",
-                        "error": str(exc)
-                    })
+            now = time.time()
+            if not symbols or now - last_symbol_discovery >= symbols_refresh_seconds:
+                discovered = discover_symbols()
+                if discovered:
+                    symbols = discovered
+                    SYMBOL_CURSOR %= len(symbols)
+                    last_symbol_discovery = now
+                    print(f"[UNIVERSE] {len(symbols)} markets discovered", flush=True)
 
-            # Funding is one lightweight request and is refreshed each cycle.
-            try:
-                funding = get_funding_rates()
-            except Exception as exc:
-                funding = {}
-                log_event({
-                    "timestamp": iso(utcnow()),
-                    "event": "FUNDING_ERROR",
-                    "error": str(exc)
-                })
+            if not symbols:
+                raise RuntimeError("No PERP markets discovered")
 
-            # Always prioritize currently open positions, then rotate through
-            # the rest of the universe. This keeps exits responsive <= 5s.
-            open_symbols = [
-                s for s in state["positions"].keys()
-                if s in symbols
-            ]
+            funding = get_funding_rates()
 
+            # Open positions are always refreshed first. Remaining markets rotate
+            # through the universe so the full set is refreshed progressively.
+            open_symbols = [s for s in state["positions"] if s in symbols]
             remaining = [s for s in symbols if s not in open_symbols]
             if remaining:
                 n = len(remaining)
-                batch = [
-                    remaining[(rotation_index + i) % n]
-                    for i in range(min(batch_size, n))
-                ]
-                rotation_index = (rotation_index + len(batch)) % n
+                batch = [remaining[(SYMBOL_CURSOR + i) % n] for i in range(min(batch_size, n))]
+                SYMBOL_CURSOR = (SYMBOL_CURSOR + len(batch)) % n
             else:
                 batch = []
-
             refresh_symbols = list(dict.fromkeys(open_symbols + batch))
 
-            def fetch_market(symbol):
-                try:
-                    data = market_detail(symbol)
-                    m = build_features(
-                        symbol,
-                        data,
-                        funding.get(symbol, {})
-                    )
-                    if min(m["mark"], m["bid"], m["ask"]) <= 0:
-                        return symbol, None, "invalid_price"
-                    return symbol, m, None
-                except Exception as exc:
-                    return symbol, None, str(exc)
+            t0 = time.time()
+            refreshed = refresh_market_batch(refresh_symbols, funding)
+            elapsed = time.time() - t0
 
-            # Small bounded pool: never blast the API with dozens of requests.
-            if refresh_symbols:
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = [pool.submit(fetch_market, s) for s in refresh_symbols]
+            # Build the decision universe from fresh cache plus still-valid cache.
+            markets = []
+            market_map = {}
+            for symbol in symbols:
+                m = MARKET_CACHE.get(symbol)
+                if m and time.time() - MARKET_CACHE_TS.get(symbol, 0) <= max(90.0, symbols_refresh_seconds * 2.0):
+                    markets.append(m)
+                    market_map[symbol] = m
 
-                    for future in as_completed(futures):
-                        symbol, m, error = future.result()
-
-                        if error:
-                            log_event({
-                                "timestamp": iso(utcnow()),
-                                "event": "SCAN_ERROR",
-                                "symbol": symbol,
-                                "error": error
-                            })
-                            continue
-
-                        market_cache[symbol] = m
-                        log_event({
-                            "timestamp": iso(utcnow()),
-                            "event": "SCAN",
-                            "market": m
-                        })
-
-            markets = list(market_cache.values())
-            market_map = {m["symbol"]: m for m in markets}
-            last_market_count = len(markets)
             scan_count += 1
 
-            # Manage positions from the freshest available market cache.
-            # Open positions are explicitly refreshed in every 5s cycle.
-            for symbol in list(state["positions"].keys()):
+            # Existing positions are managed every cycle when their market was refreshed.
+            for symbol in open_symbols:
                 m = market_map.get(symbol)
-                if not m:
-                    continue
-                apply_funding(state, m)
-                manage_position(state, m)
+                if m:
+                    apply_funding(state, m)
+                    manage_position(state, m)
 
             mark_equity(state, market_map)
 
             if not halted and markets:
-                median_momentum = median(
-                    [m["momentum5"] for m in markets]
-                ) if markets else 0.0
+                median_momentum = median([m["momentum5"] for m in markets]) if markets else 0.0
 
-                # Fill available slots using the complete cached universe.
-                for _ in range(
-                    max(
-                        0,
-                        CFG["risk"]["max_open_positions"]
-                        - len(state["positions"])
-                    )
-                ):
+                for _ in range(max(0, CFG["risk"]["max_open_positions"] - len(state["positions"]))):
                     candidates = []
-
                     for m in markets:
                         if m["symbol"] in state["positions"]:
                             continue
-
                         result = choose_direction(m, median_momentum)
                         if result:
                             score_val, direction, reasons = result
-                            candidates.append({
-                                "score": score_val,
-                                "direction": direction,
-                                "market": m,
-                                "reasons": reasons
-                            })
+                            candidates.append({"score": score_val, "direction": direction, "market": m, "reasons": reasons})
 
                     candidates.sort(key=lambda x: x["score"], reverse=True)
-
                     if not candidates:
                         break
 
                     slot = len(state["positions"])
                     threshold = score_threshold(slot)
                     chosen = None
-
                     for candidate in candidates:
                         if candidate["score"] < threshold:
                             break
-
-                        ok, reject_reason = portfolio_allows(
-                            state,
-                            candidate,
-                            market_map
-                        )
-
+                        ok, reject_reason = portfolio_allows(state, candidate, market_map)
                         if ok:
                             chosen = candidate
                             break
-
-                        log_event({
-                            "timestamp": iso(utcnow()),
-                            "event": "CANDIDATE_REJECTED",
-                            "symbol": candidate["market"]["symbol"],
-                            "direction": candidate["direction"],
-                            "score": candidate["score"],
-                            "reason": reject_reason
-                        })
+                        log_event({"timestamp": iso(utcnow()), "event": "CANDIDATE_REJECTED", "symbol": candidate["market"]["symbol"], "direction": candidate["direction"], "score": candidate["score"], "reason": reject_reason})
 
                     if not chosen:
                         break
 
-                    log_event({
-                        "timestamp": iso(utcnow()),
-                        "event": "SELECT",
-                        "symbol": chosen["market"]["symbol"],
-                        "direction": chosen["direction"],
-                        "score": chosen["score"],
-                        "slot": slot + 1,
-                        "reasons": chosen["reasons"]
-                    })
-
+                    log_event({"timestamp": iso(utcnow()), "event": "SELECT", "symbol": chosen["market"]["symbol"], "direction": chosen["direction"], "score": chosen["score"], "slot": slot + 1, "reasons": chosen["reasons"]})
                     open_position(state, chosen)
 
             mark_equity(state, market_map)
-
-            # The report uses the actual number of cached/processed markets.
-            state["_last_markets_count"] = last_market_count
-            write_report(state, scan_count)
-            state.pop("_last_markets_count", None)
+            write_report(state, scan_count, len(markets))
             save_state(state)
 
-            last_heartbeat = maybe_heartbeat(
-                state,
-                last_market_count,
-                last_heartbeat
-            )
-
+            last_heartbeat = maybe_heartbeat(state, len(markets), last_heartbeat)
             print(
                 f"[HEARTBEAT] equity=${state['equity']:.2f} "
                 f"realized={state['realized_pnl']:+.2f} "
                 f"unrealized={state['unrealized_pnl']:+.2f} "
                 f"positions={len(state['positions'])} "
                 f"wins={state['wins']} losses={state['losses']} "
-                f"markets={last_market_count}/{len(symbols)} "
-                f"batch={len(refresh_symbols)} "
-                f"halt={state['halt_reason'] or '-'}"
+                f"markets={len(markets)}/{len(symbols)} refreshed={len(refreshed)} "
+                f"batch={len(refresh_symbols)} api={elapsed:.2f}s "
+                f"halt={state['halt_reason'] or '-'}",
+                flush=True
             )
 
-            # Keep the cycle at approximately 5 seconds without overlapping
-            # scans. If the API is slower, the next cycle waits rather than
-            # spawning another batch on top of it.
-            elapsed = time.monotonic() - cycle_started
-            time.sleep(max(0.25, cycle_seconds - elapsed))
+            sleep_for = max(0.2, cycle_seconds - (time.time() - cycle_started))
+            time.sleep(sleep_for)
 
         except KeyboardInterrupt:
             save_state(state)
-            print("Stopped.")
+            print("Stopped.", flush=True)
             break
-
         except Exception as exc:
-            log_event({
-                "timestamp": iso(utcnow()),
-                "event": "LOOP_ERROR",
-                "error": str(exc)
-            })
+            log_event({"timestamp": iso(utcnow()), "event": "LOOP_ERROR", "error": str(exc)})
             save_state(state)
-
-            # Do not spam Telegram on every transient API error.
-            # A single error is enough; the loop recovers on the next cycle.
-            telegram_send(
-                f"⚠️ AGENT ERROR\n"
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            time.sleep(5)
+            print(f"[LOOP_ERROR] {type(exc).__name__}: {exc}", flush=True)
+            telegram_send(f"⚠️ AGENT ERROR\n{type(exc).__name__}: {exc}")
+            time.sleep(cycle_seconds)
 
 
 if __name__ == "__main__":

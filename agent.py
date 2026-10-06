@@ -930,7 +930,7 @@ def risk_halt(state):
     return False, ""
 
 
-def write_report(state, scan_count):
+def write_report(state, scan_count, markets_count=0):
     closed = state["wins"] + state["losses"]
     win_rate = state["wins"] / closed * 100 if closed else 0.0
     pf = (
@@ -952,72 +952,13 @@ def write_report(state, scan_count):
         "max_position_pct": CFG["risk"]["max_position_pct"],
         "max_total_exposure_pct": CFG["risk"]["max_total_position_pct"],
         "live_order_execution": False,
-        "scan_count": scan_count
+        "scan_count": scan_count,
+        "markets_count": markets_count
     }
     REPORT_FILE.write_text(
         json.dumps(report, indent=2, default=str),
         encoding="utf-8"
     )
-
-
-def maybe_hourly_report(state, markets_count):
-    now = utcnow()
-    hour_key = now.strftime("%Y-%m-%d %H")
-
-    # Persist the snapshot so a Render restart does not silently reset the
-    # hourly accounting. The report is for the completed previous hour.
-    snapshot_key = state.get("hour_report_key")
-    if snapshot_key is None:
-        state["hour_report_key"] = hour_key
-        state["hour_start_equity"] = state["equity"]
-        state["hour_start_trades"] = state["trades"]
-        state["hour_start_wins"] = state["wins"]
-        state["hour_start_losses"] = state["losses"]
-        state["hour_start_gross_profit"] = state["gross_profit"]
-        state["hour_start_gross_loss"] = state["gross_loss"]
-        return
-
-    if snapshot_key == hour_key:
-        return
-
-    start_equity = num(state.get("hour_start_equity"), state["equity"])
-    start_trades = int(state.get("hour_start_trades", state["trades"]))
-    start_wins = int(state.get("hour_start_wins", state["wins"]))
-    start_losses = int(state.get("hour_start_losses", state["losses"]))
-    start_gp = num(state.get("hour_start_gross_profit"))
-    start_gl = num(state.get("hour_start_gross_loss"))
-
-    hourly_entries = max(0, state["trades"] - start_trades)
-    hourly_wins = max(0, state["wins"] - start_wins)
-    hourly_losses = max(0, state["losses"] - start_losses)
-    hourly_closed = hourly_wins + hourly_losses
-    hourly_profit = state["equity"] - start_equity
-    hourly_gross_profit = state["gross_profit"] - start_gp
-    hourly_gross_loss = state["gross_loss"] - start_gl
-
-    telegram_send(
-        f"📊 PAPER RAPORT — OSTATNIA 1H\n"
-        f"💰 Start: ${start_equity:.2f}\n"
-        f"💰 Koniec: ${state['equity']:.2f}\n"
-        f"📈 Zysk: ${hourly_profit:+.2f}\n\n"
-        f"🔄 Transakcje zamknięte: {hourly_closed}\n"
-        f"🟢 Wygrane: {hourly_wins}\n"
-        f"🔴 Przegrane: {hourly_losses}\n"
-        f"📥 Nowe wejścia: {hourly_entries}\n\n"
-        f"📈 Zyskowne P/L: ${hourly_gross_profit:+.2f}\n"
-        f"📉 Stratne P/L: ${-hourly_gross_loss:+.2f}\n"
-        f"📂 Otwarte pozycje: {len(state['positions'])}/{CFG['risk']['max_open_positions']}\n"
-        f"🔎 Rynki skanowane: {markets_count}\n"
-        f"📊 Łączny P/L: ${state['equity'] - CFG['starting_equity']:+.2f}"
-    )
-
-    state["hour_report_key"] = hour_key
-    state["hour_start_equity"] = state["equity"]
-    state["hour_start_trades"] = state["trades"]
-    state["hour_start_wins"] = state["wins"]
-    state["hour_start_losses"] = state["losses"]
-    state["hour_start_gross_profit"] = state["gross_profit"]
-    state["hour_start_gross_loss"] = state["gross_loss"]
 
 
 def maybe_heartbeat(state, markets_count, last_heartbeat):
@@ -1171,10 +1112,7 @@ def main():
                     open_position(state, chosen)
 
             mark_equity(state, market_map)
-            write_report(state, scan_count)
-            save_state(state)
-
-            maybe_hourly_report(state, len(markets))
+            write_report(state, scan_count, len(markets))
             save_state(state)
 
             last_heartbeat = maybe_heartbeat(
@@ -1190,7 +1128,7 @@ def main():
                 f"halt={state['halt_reason'] or '-'}"
             )
 
-          time.sleep(2)
+            time.sleep(CFG["poll_seconds"])
 
         except KeyboardInterrupt:
             save_state(state)

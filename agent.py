@@ -565,9 +565,40 @@ def overextension_metrics(m):
     }
 
 
+def expected_move_metrics(m):
+    """Conservative proxy for whether the market has enough movement potential.
+
+    This is a filter aid, not a prediction that price will actually move by that amount.
+    It combines ATR capacity, directional 15-bar momentum, and recent range.
+    """
+    f = CFG["filters"]
+    atr = max(0.0, num(m.get("atr_pct")))
+    mom15 = abs(num(m.get("momentum15")))
+    candles = m.get("candles", []) or []
+    look = min(6, len(candles))
+    recent_range = 0.0
+    if look >= 2:
+        recent = candles[-look:]
+        hi = max(num(c.get("high")) for c in recent)
+        lo = min(num(c.get("low")) for c in recent)
+        close = num(m.get("mark"))
+        if close > 0 and hi > 0 and lo > 0:
+            recent_range = max(0.0, (hi - lo) / close * 100.0)
+    atr_component = atr * float(f.get("expected_move_atr_multiple", 3.0))
+    momentum_component = mom15 * float(f.get("expected_move_momentum15_multiple", 1.35))
+    range_component = recent_range * float(f.get("expected_move_recent_range_fraction", 0.75))
+    proxy = max(atr_component, momentum_component, range_component)
+    return {
+        "expected_move_pct": proxy,
+        "expected_move_atr_component_pct": atr_component,
+        "expected_move_momentum_component_pct": momentum_component,
+        "expected_move_recent_range_pct": recent_range,
+    }
+
 def add_entry_context(m):
     ext = overextension_metrics(m)
     m.update({f"overext_{k}": v for k, v in ext.items()})
+    m.update(expected_move_metrics(m))
     return m
 
 def direction_score(m, direction, median_momentum):
@@ -593,6 +624,11 @@ def direction_score(m, direction, median_momentum):
         rejects.append("shock_candle")
     if m["regime"] == "RANGE":
         rejects.append("range_regime")
+
+    expected_move = num(m.get("expected_move_pct"))
+    min_expected_move = float(f.get("min_expected_move_pct", 0.0))
+    if expected_move < min_expected_move:
+        rejects.append("insufficient_move_potential")
 
     btc_regime = str(m.get("btc_regime", "UNKNOWN"))
     if direction == "LONG" and btc_regime == "BEARISH":
@@ -628,6 +664,13 @@ def direction_score(m, direction, median_momentum):
     else:
         score += 5
         reasons.append("mixed_regime")
+
+    expected_move = num(m.get("expected_move_pct"))
+    if expected_move >= float(f.get("preferred_expected_move_pct", 8.0)):
+        score += 5
+        reasons.append("move_potential_strong")
+    else:
+        reasons.append("move_potential_ok")
 
     if momentum5 >= f["min_momentum_5_pct"]:
         score += 12
@@ -1355,6 +1398,8 @@ def write_report(state, scan_count, markets_count=0):
         "btc_symbol": state.get("btc_symbol"),
         "btc_regime": state.get("btc_regime", "UNKNOWN"),
         "slippage_pct_per_side": CFG["filters"].get("slippage_pct_per_side", 0.0),
+        "min_expected_move_pct": CFG["filters"].get("min_expected_move_pct", 3.5),
+        "preferred_expected_move_pct": CFG["filters"].get("preferred_expected_move_pct", 8.0),
         "live_order_execution": False,
         "scan_count": scan_count,
         "markets_count": markets_count,

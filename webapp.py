@@ -135,7 +135,7 @@ HTML = r'''<!doctype html>
 <div class="card"><div class="k">Today's P/L</div><div id="daily" class="v green">+$0.00</div><div id="p24" class="tiny">24H: +$0.00 • 0 trades</div></div>
 <div class="card"><div class="k">Win rate / PF</div><div id="win" class="v">0.0%</div><div id="pf" class="tiny">PF —</div></div>
 <div class="card span2"><div class="section"><h2>📈 Equity</h2><div class="tabs"><button class="tab active" data-range="24h">24H</button><button class="tab" data-range="7d">7D</button><button class="tab" data-range="all">ALL-TIME</button></div></div><div id="chart" class="chart">Agent is collecting data…</div></div>
-<div class="card span2"><div class="section"><h2>🤖 Bot Health</h2><span class="tiny">PAPER ONLY</span></div><div class="statusrow"><b class="check">✓</b><span>Agent</span><span id="agentstate">RUNNING</span></div><div class="statusrow"><b class="check">✓</b><span>Market cycle</span><span>5s target</span></div><div class="statusrow"><b class="check">✓</b><span>Markets refreshed</span><span id="markets">0</span></div><div class="statusrow"><b class="check">✓</b><span>BTC regime</span><span id="btc">UNKNOWN</span></div><div class="statusrow"><b class="check">✓</b><span>Loss streak</span><span id="lossstreak">0/3</span></div><div class="statusrow"><b class="check">✓</b><span>Risk / cooldown</span><span id="halt">RUNNING</span></div><div class="statusrow"><b class="check">✓</b><span>Last loop</span><span id="lastloop">—</span></div><div class="statusrow"><b class="check">✓</b><span>Errors</span><span id="errors">0</span></div></div>
+<div class="card span2"><div class="section"><h2>🤖 Bot Health</h2><span class="tiny">PAPER ONLY</span></div><div class="statusrow"><b class="check">✓</b><span>Agent</span><span id="agentstate">RUNNING</span></div><div class="statusrow"><b class="check">✓</b><span>Market cycle</span><span>5s target</span></div><div class="statusrow"><b class="check">✓</b><span>Markets refreshed</span><span id="markets">0</span></div><div class="statusrow"><b class="check">✓</b><span>Risk / cooldown</span><span id="halt">RUNNING</span></div><div class="statusrow"><b class="check">✓</b><span>Last loop</span><span id="lastloop">—</span></div><div class="statusrow"><b class="check">✓</b><span>Errors</span><span id="errors">0</span></div></div>
 <div class="card span4"><div class="section"><h2>🟢 Open Positions</h2><span class="tiny">SL -15% • trailing from +10%</span></div><div style="overflow:auto"><table><thead><tr><th>Market</th><th>Side</th><th>Entry</th><th>Current</th><th>P/L</th><th>SL / Trail</th><th>Peak</th><th>Chart</th><th>Lev.</th><th>Notional</th><th>Score</th></tr></thead><tbody id="positions"></tbody></table></div></div>
 <div class="card span4"><div class="section"><h2>📊 Performance</h2><span class="tiny">ALL-TIME</span></div><div class="metricgrid"><div class="metric"><span class="tiny">Avg winner</span><b id="avgw">$0.00</b></div><div class="metric"><span class="tiny">Avg loser</span><b id="avgl">$0.00</b></div><div class="metric"><span class="tiny">Current DD</span><b id="dd">0.0%</b></div><div class="metric"><span class="tiny">Max DD</span><b id="mdd">0.0%</b></div></div></div>
 <div class="card span2"><div class="section"><h2>🏆 ALL-TIME Trades</h2><span class="tiny">cała historia zapisanej sesji</span></div><div style="overflow:auto;max-height:550px"><table><thead><tr><th>Time</th><th></th><th>Market</th><th>Side</th><th>P/L</th><th>Reason</th><th>Peak</th><th>Hold</th></tr></thead><tbody id="history"></tbody></table></div></div>
@@ -145,7 +145,45 @@ HTML = r'''<!doctype html>
 </div><div id="footer" class="footer">🟢 Live • connecting… • PAPER ONLY</div></div>
 <script>
 const $=id=>document.getElementById(id), money=x=>'$'+Number(x||0).toFixed(2);let selectedRange='24h',latestStatus=null;
-function chart(vals){if(!vals.length)return 'Agent is collecting data…';const w=900,h=240,p=28,min=Math.min(...vals.map(x=>x.equity)),max=Math.max(...vals.map(x=>x.equity)),r=max-min||1;const pts=vals.map((v,i)=>[p+i*(w-2*p)/Math.max(1,vals.length-1),h-p-(v.equity-min)*(h-2*p)/r]);const d=pts.map((q,i)=>(i?'L':'M')+q[0].toFixed(1)+' '+q[1].toFixed(1)).join(' ');return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="#8b5cf6" stroke-width="3"/><circle cx="${pts.at(-1)[0]}" cy="${pts.at(-1)[1]}" r="4" fill="#f5c451"/></svg>`}
+function chart(vals){
+  if(!vals.length)return 'Agent is collecting data…';
+  const clean=vals.filter(x=>x&&Number.isFinite(Number(x.equity))&&x.ts);
+  if(!clean.length)return 'Agent is collecting data…';
+  const w=900,h=260,left=72,right=24,top=18,bottom=42;
+  const min0=Math.min(...clean.map(x=>Number(x.equity)));
+  const max0=Math.max(...clean.map(x=>Number(x.equity)));
+  const span=max0-min0;
+  const pad=span===0?0.5:Math.max(span*0.12,0.05);
+  const min=Math.floor((min0-pad)*100)/100;
+  const max=Math.ceil((max0+pad)*100)/100;
+  const r=max-min||1;
+  const plotW=w-left-right,plotH=h-top-bottom;
+  const x=i=>left+i*plotW/Math.max(1,clean.length-1);
+  const y=v=>top+(max-Number(v))*plotH/r;
+  const pts=clean.map((v,i)=>[x(i),y(v.equity)]);
+  const path=pts.map((q,i)=>(i?'L':'M')+q[0].toFixed(1)+' '+q[1].toFixed(1)).join(' ');
+  const ticks=4;
+  let grid='',labelsY='';
+  for(let i=0;i<=ticks;i++){
+    const val=min+(max-min)*(1-i/ticks);
+    const yy=top+i*plotH/ticks;
+    grid+=`<line x1="${left}" x2="${w-right}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="#26384b" stroke-width="1" opacity="0.55"/>`;
+    labelsY+=`<text x="${left-10}" y="${(yy+4).toFixed(1)}" text-anchor="end" fill="#8fa0b3" font-size="11">${money(val)}</text>`;
+  }
+  const xTickCount=Math.min(4,clean.length-1);
+  let labelsX='';
+  for(let i=0;i<=xTickCount;i++){
+    const idx=Math.round(i*(clean.length-1)/Math.max(1,xTickCount));
+    const xx=x(idx);
+    const dt=new Date(clean[idx].ts);
+    const label=selectedRange==='all'?dt.toLocaleDateString('pl-PL',{day:'2-digit',month:'2-digit'}):dt.toLocaleTimeString('pl-PL',{hour:'2-digit',minute:'2-digit'});
+    labelsX+=`<line x1="${xx.toFixed(1)}" x2="${xx.toFixed(1)}" y1="${h-bottom}" y2="${h-bottom+4}" stroke="#26384b"/><text x="${xx.toFixed(1)}" y="${h-14}" text-anchor="middle" fill="#8fa0b3" font-size="11">${label}</text>`;
+  }
+  const last=clean.at(-1);
+  const lastPt=pts.at(-1);
+  const lastLabel=money(last.equity);
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Equity chart"><line x1="${left}" x2="${left}" y1="${top}" y2="${h-bottom}" stroke="#26384b"/><line x1="${left}" x2="${w-right}" y1="${h-bottom}" y2="${h-bottom}" stroke="#26384b"/>${grid}${labelsY}${labelsX}<path d="${path}" fill="none" stroke="#8b5cf6" stroke-width="3"/><circle cx="${lastPt[0].toFixed(1)}" cy="${lastPt[1].toFixed(1)}" r="4" fill="#f5c451"/><text x="${Math.min(w-right-4,lastPt[0]+8).toFixed(1)}" y="${Math.max(top+12,lastPt[1]-8).toFixed(1)}" fill="#f5c451" font-size="12" font-weight="700">${lastLabel}</text></svg>`;
+}
 function sample(vals,maxn=1000){if(vals.length<=maxn)return vals;const out=[];const step=(vals.length-1)/(maxn-1);for(let i=0;i<maxn;i++)out.push(vals[Math.round(i*step)]);return out}
 function rangeData(history){const now=Date.now(),cut=selectedRange==='24h'?now-86400000:selectedRange==='7d'?now-7*86400000:0;return sample((history||[]).filter(x=>!cut||new Date(x.ts).getTime()>=cut));}
 function candleSvg(candles){const cs=(candles||[]).slice(-20);if(!cs.length)return '—';const w=100,h=38,p=3;let min=Math.min(...cs.map(c=>Number(c.low||c.close))),max=Math.max(...cs.map(c=>Number(c.high||c.close)));let r=max-min||1,body=Math.max(1,(h-2*p)/100);let svg=`<svg class="spark" viewBox="0 0 ${w} ${h}">`;cs.forEach((c,i)=>{const x=p+i*(w-2*p)/Math.max(1,cs.length-1);const y=v=>h-p-(Number(v)-min)*(h-2*p)/r;const yo=y(c.open),yc=y(c.close),yh=y(c.high),yl=y(c.low);const up=Number(c.close)>=Number(c.open);const sw=up?'#35e58a':'#ff5e6c';const top=Math.min(yo,yc),bh=Math.max(body,Math.abs(yc-yo));svg+=`<line x1="${x}" x2="${x}" y1="${yh}" y2="${yl}" stroke="${sw}"/><rect x="${x-1.5}" y="${top}" width="3" height="${bh}" fill="${sw}"/>`;});return svg+'</svg>'}

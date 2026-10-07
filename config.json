@@ -38,7 +38,9 @@
     "exceptional_requires_trend": true,
     "exceptional_risk_per_trade_pct": 1.8,
     "max_exceptional_positions": 1,
-    "max_correlated_positions": 2
+    "max_correlated_positions": 2,
+    "stale_position_timeout_minutes": 60,
+    "stale_min_progress_pct": 0.05
   },
   "filters": {
     "min_24h_volume": 10000.0,

@@ -30,3 +30,9 @@ V2.2 persistence:
 - A low-frequency checkpoint limits database activity.
 - Render restarts/redeploys therefore no longer reset the paper portfolio when DATABASE_URL is configured.
 - Required environment variable on Render: DATABASE_URL (the Neon pooled connection string).
+
+
+Safety / persistence:
+- Neon PostgreSQL is the durable source of truth when DATABASE_URL is configured.
+- If Neon cannot be read or a required save fails, the paper agent fails closed instead of continuing on local-only state.
+- Positions that have not improved their best profit by at least 0.05 percentage points for 60 minutes and have not activated trailing are closed with reason STALE_NO_PROGRESS_60M.

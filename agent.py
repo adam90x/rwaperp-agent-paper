@@ -228,7 +228,13 @@ def load_state():
 def save_state(state, force=False):
     # Always keep a local cache. Durable persistence is handled by Neon.
     STATE_FILE.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
-    db_persistence.save_state(state, force=force)
+    if db_persistence.enabled():
+        ok = db_persistence.save_state(state, force=force)
+        if not ok:
+            raise RuntimeError(
+                f"PERSISTENCE REQUIRED — Neon save failed: "
+                f"{db_persistence.status().get('last_error')}"
+            )
 
 
 def post_query(payload):
@@ -962,6 +968,8 @@ def open_position(state, candidate):
         "r_distance": entry * stop_pct / 100,
         "partial_taken": False,
         "opened_at": iso(utcnow()),
+        "last_progress_at": iso(utcnow()),
+        "last_progress_profit_pct": 0.0,
         "entry_score": candidate["score"],
         "entry_reasons": candidate["reasons"],
         "funding_paid": 0.0,
@@ -1164,6 +1172,7 @@ def close_position(state, m, reason):
         "score_bucket": bucket,
         "entry_reasons": pos.get("entry_reasons", []),
         "peak_profit_pct": peak_profit,
+        "last_progress_at": pos.get("last_progress_at"),
         "hold_minutes": hold_minutes,
         "exceptional_setup": bool(pos.get("exceptional_setup", False)),
         "position_pct": pos.get("position_pct", CFG["risk"]["max_position_pct"]),
@@ -1247,12 +1256,34 @@ def manage_position(state, m):
     peak_profit = float(pos.get("peak_profit_pct", 0.0))
 
     # Track the best price/profit reached while the position is open.
-    if profit_pct > peak_profit:
+    # Require a meaningful improvement so floating-point noise / tiny ticks do
+    # not keep a stale position alive forever.
+    progress_step_pct = float(CFG["risk"].get("stale_min_progress_pct", 0.05))
+    if profit_pct > peak_profit + progress_step_pct:
         pos["peak_profit_pct"] = profit_pct
         pos["peak_price"] = px
         peak_profit = profit_pct
+        pos["last_progress_at"] = iso(utcnow())
+        pos["last_progress_profit_pct"] = profit_pct
 
     activation = float(CFG["risk"].get("trail_activation_pct", 10.0))
+
+    # Stale-position protection: if a position has not made meaningful progress
+    # for the configured period and has never reached the trailing activation
+    # threshold, close it to free the slot for a stronger setup.
+    stale_minutes = float(CFG["risk"].get("stale_position_timeout_minutes", 60.0))
+    try:
+        last_progress = datetime.fromisoformat(
+            pos.get("last_progress_at", pos["opened_at"]).replace("Z", "+00:00")
+        )
+        no_progress_minutes = max(0.0, (utcnow() - last_progress).total_seconds() / 60.0)
+    except (KeyError, TypeError, ValueError):
+        no_progress_minutes = 0.0
+    if (stale_minutes > 0 and no_progress_minutes >= stale_minutes
+            and peak_profit < activation
+            and not pos.get("trailing_active", False)):
+        close_position(state, m, "STALE_NO_PROGRESS_60M")
+        return
     if peak_profit >= activation:
         pos["trailing_active"] = True
         retrace = trailing_retrace_pct(peak_profit)
@@ -1492,12 +1523,24 @@ def maybe_heartbeat(state, markets_count, last_heartbeat):
 def main():
     global SYMBOL_CURSOR, LAST_SYMBOL_REFRESH
 
-    db_persistence.init_db()
+    # If DATABASE_URL is configured, persistence is mandatory. We do not let
+    # the bot trade against a local-only state because a Render restart could
+    # then lose positions/history. Fail closed until Neon is healthy.
+    if db_persistence.enabled():
+        if not db_persistence.init_db():
+            raise RuntimeError(f"PERSISTENCE REQUIRED — Neon unavailable: {db_persistence.status().get('last_error')}")
     state = load_state()
-    # Seed Neon only when the project is empty. Never overwrite a durable
-    # portfolio with a fresh local/default state after a Render restart.
-    if db_persistence.enabled() and db_persistence.load_state() is None:
-        db_persistence.save_state(state, force=True)
+    # If Neon is configured, a read error is fatal. Never fall back to a
+    # potentially stale local cache and never overwrite a durable portfolio.
+    if db_persistence.enabled():
+        pstatus = db_persistence.status()
+        if pstatus.get("last_error"):
+            raise RuntimeError(f"PERSISTENCE REQUIRED — Neon load failed: {pstatus.get('last_error')}")
+        # Seed only when the table is healthy and genuinely empty.
+        if pstatus.get("state_exists") is False:
+            if not db_persistence.save_state(state, force=True):
+                raise RuntimeError(f"PERSISTENCE REQUIRED — initial Neon save failed: {db_persistence.status().get('last_error')}")
+            print("[PERSISTENCE] Initial state seeded to Neon PostgreSQL", flush=True)
     scan_count = 0
     last_heartbeat = 0.0
     last_halt_reason = None

@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 _DB_READY = False
 _LAST_DB_SAVE = 0.0
 _LAST_DB_ERROR = None
+_LAST_LOAD_FOUND = None
 _CHECKPOINT_SECONDS = 300.0  # 5 minutes; entries/exits force an immediate save.
 
 
@@ -31,7 +32,15 @@ def status() -> Dict[str, Any]:
         "ready": _DB_READY,
         "last_error": _LAST_DB_ERROR,
         "last_save_ts": _LAST_DB_SAVE,
+        "state_exists": _LAST_LOAD_FOUND,
+        "checkpoint_seconds": _CHECKPOINT_SECONDS,
     }
+
+
+def _error_text(exc: Exception) -> str:
+    # Never expose DATABASE_URL / password in the dashboard or logs.
+    msg = str(exc).replace(_dsn(), "[DATABASE_URL]") if _dsn() else str(exc)
+    return f"{type(exc).__name__}: {msg}"[:500]
 
 
 def _connect():
@@ -40,9 +49,10 @@ def _connect():
 
 
 def init_db() -> bool:
-    global _DB_READY, _LAST_DB_ERROR
+    global _DB_READY, _LAST_DB_ERROR, _LAST_LOAD_FOUND
     if not enabled():
         _LAST_DB_ERROR = "DATABASE_URL not set"
+        print("[PERSISTENCE] DISABLED: DATABASE_URL not set", flush=True)
         return False
     try:
         with _connect() as conn:
@@ -57,16 +67,19 @@ def init_db() -> bool:
             conn.commit()
         _DB_READY = True
         _LAST_DB_ERROR = None
+        print("[PERSISTENCE] Neon PostgreSQL READY", flush=True)
         return True
     except Exception as exc:
         _DB_READY = False
-        _LAST_DB_ERROR = f"{type(exc).__name__}: {exc}"
+        _LAST_DB_ERROR = _error_text(exc)
+        print(f"[PERSISTENCE] Neon PostgreSQL ERROR: {_LAST_DB_ERROR}", flush=True)
         return False
 
 
 def load_state() -> Optional[Dict[str, Any]]:
-    global _DB_READY, _LAST_DB_ERROR
+    global _DB_READY, _LAST_DB_ERROR, _LAST_LOAD_FOUND
     if not enabled():
+        _LAST_LOAD_FOUND = None
         return None
     try:
         if not _DB_READY and not init_db():
@@ -75,15 +88,19 @@ def load_state() -> Optional[Dict[str, Any]]:
             with conn.cursor() as cur:
                 cur.execute("SELECT state FROM rwaperp_state WHERE state_id = 1")
                 row = cur.fetchone()
-        if not row:
-            return None
         _DB_READY = True
         _LAST_DB_ERROR = None
+        if not row:
+            _LAST_LOAD_FOUND = False
+            return None
+        _LAST_LOAD_FOUND = True
         state = row[0]
         return state if isinstance(state, dict) else json.loads(state)
     except Exception as exc:
         _DB_READY = False
-        _LAST_DB_ERROR = f"{type(exc).__name__}: {exc}"
+        _LAST_LOAD_FOUND = None
+        _LAST_DB_ERROR = _error_text(exc)
+        print(f"[PERSISTENCE] Neon load ERROR: {_LAST_DB_ERROR}", flush=True)
         return None
 
 
@@ -114,5 +131,6 @@ def save_state(state: Dict[str, Any], force: bool = False) -> bool:
         return True
     except Exception as exc:
         _DB_READY = False
-        _LAST_DB_ERROR = f"{type(exc).__name__}: {exc}"
+        _LAST_DB_ERROR = _error_text(exc)
+        print(f"[PERSISTENCE] Neon save ERROR: {_LAST_DB_ERROR}", flush=True)
         return False

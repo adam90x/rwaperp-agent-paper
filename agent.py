@@ -8,6 +8,8 @@ from pathlib import Path
 from statistics import median
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import db_persistence
+
 import requests
 
 BASE_URL = "https://api-trade.rwaperp.xyz"
@@ -119,6 +121,42 @@ def load_state():
             pos.setdefault("candles", [])
         return pos
 
+    # Neon is the durable source of truth. The local JSON file remains a
+    # fallback/cache so the bot can still start if Neon is temporarily down.
+    neon_state = db_persistence.load_state()
+    if neon_state:
+        state = neon_state
+        state.setdefault("peak_equity", state.get("equity", CFG["starting_equity"]))
+        state.setdefault("day", utcnow().date().isoformat())
+        state.setdefault("day_start_equity", state.get("equity", CFG["starting_equity"]))
+        state.setdefault("realized_pnl", 0.0)
+        state.setdefault("unrealized_pnl", 0.0)
+        state.setdefault("gross_profit", 0.0)
+        state.setdefault("gross_loss", 0.0)
+        state.setdefault("wins", 0)
+        state.setdefault("losses", 0)
+        state.setdefault("trades", 0)
+        state.setdefault("consecutive_losses", 0)
+        state.setdefault("positions", {})
+        state.setdefault("cooldown_until", None)
+        state.setdefault("halt_reason", None)
+        state.setdefault("equity_history", [])
+        state.setdefault("daily_history", {})
+        state.setdefault("trade_history", [])
+        state.setdefault("scanner_stats", {"markets_seen": 0, "candidate_markets": 0, "selected": 0, "portfolio_rejected": 0, "rejections": {}})
+        state.setdefault("strategy_stats", {"by_market": {}, "by_exit_reason": {}, "by_entry_reason": {}, "by_score_bucket": {}})
+        state.setdefault("max_drawdown_pct", 0.0)
+        state.setdefault("btc_symbol", None)
+        state.setdefault("btc_regime", "UNKNOWN")
+        state.setdefault("last_equity_sample_ts", 0.0)
+        state.setdefault("last_loop_ts", None)
+        state.setdefault("last_scan_ts", None)
+        state.setdefault("last_error", None)
+        state.setdefault("api_errors", 0)
+        state["positions"] = {sym: migrate_position(pos) for sym, pos in state.get("positions", {}).items()}
+        print("[PERSISTENCE] Restored state from Neon PostgreSQL", flush=True)
+        return state
+
     if STATE_FILE.exists():
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         state.setdefault("peak_equity", state.get("equity", CFG["starting_equity"]))
@@ -187,8 +225,10 @@ def load_state():
     }
 
 
-def save_state(state):
+def save_state(state, force=False):
+    # Always keep a local cache. Durable persistence is handled by Neon.
     STATE_FILE.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+    db_persistence.save_state(state, force=force)
 
 
 def post_query(payload):
@@ -986,6 +1026,7 @@ def open_position(state, candidate):
         + ("\n⭐ EXCEPTIONAL SETUP" if exceptional else "")
     )
     log_event({"timestamp": iso(utcnow()), "event": "PAPER_ENTRY", **pos})
+    save_state(state, force=True)
     telegram_send(msg)
 
 
@@ -1167,6 +1208,7 @@ def close_position(state, m, reason):
         + ("\n🛑 LOSS COOLDOWN" if cooldown_triggered else "")
     )
     del state["positions"][m["symbol"]]
+    save_state(state, force=True)
 
 def trailing_retrace_pct(peak_profit_pct):
     r = CFG["risk"]
@@ -1407,6 +1449,7 @@ def write_report(state, scan_count, markets_count=0):
         "last_scan_ts": state.get("last_scan_ts"),
         "last_error": state.get("last_error"),
         "api_errors": state.get("api_errors", 0),
+        "persistence": db_persistence.status(),
         "cooldown_remaining_sec": cooldown_remaining,
         "consecutive_losses": state.get("consecutive_losses", 0),
         "max_consecutive_losses": CFG["risk"].get("max_consecutive_losses", 3),
@@ -1449,7 +1492,12 @@ def maybe_heartbeat(state, markets_count, last_heartbeat):
 def main():
     global SYMBOL_CURSOR, LAST_SYMBOL_REFRESH
 
+    db_persistence.init_db()
     state = load_state()
+    # Seed Neon only when the project is empty. Never overwrite a durable
+    # portfolio with a fresh local/default state after a Render restart.
+    if db_persistence.enabled() and db_persistence.load_state() is None:
+        db_persistence.save_state(state, force=True)
     scan_count = 0
     last_heartbeat = 0.0
     last_halt_reason = None
